@@ -14,10 +14,9 @@ NEWS_API_KEY      = os.getenv("NEWS_API_KEY",      "164efb308b644a1084fd3b542263
 ALPACA_BASE_URL   = "https://paper-api.alpaca.markets"
 ALPACA_DATA_URL   = "https://data.alpaca.markets"
 
-SCAN_INTERVAL_MINUTES     = 0    # 0 = continuous scanning
+SCAN_INTERVAL_MINUTES     = 15
 POSITION_MONITOR_MINUTES  = 5
 TREND_SCAN_MINUTES        = 30
-SECONDS_BETWEEN_STOCKS    = 8    # pause between each stock to avoid API rate limits
 
 TAKE_PROFIT_PCT   = 0.10
 STOP_LOSS_PCT     = 0.05
@@ -261,26 +260,21 @@ def analyse_stock(symbol):
 def should_buy(analysis, news_score):
     if analysis is None:
         return False, "No data"
+    reasons = []
+    if news_score >= 2:
+        reasons.append(f"positive news score ({news_score})")
+    if analysis["change_pct"] >= 2:
+        reasons.append(f"up {analysis['change_pct']}% today")
+    if 50 <= analysis["rsi"] <= 72:
+        reasons.append(f"RSI {analysis['rsi']} (rising momentum)")
+    if analysis["volume_ratio"] >= 1.5:
+        reasons.append(f"volume {analysis['volume_ratio']}x above average")
+    if analysis["above_ma20"]:
+        reasons.append("above 20-period MA")
 
-    news_ok  = news_score >= 2
-    price_ok = analysis["change_pct"] >= 2
-    rsi_ok   = 50 <= analysis["rsi"] <= 72
-    vol_ok   = analysis["volume_ratio"] >= 1.5
-    ma_ok    = analysis["above_ma20"]
-
-    signals = [
-        "news(" + str(news_score) + ")" + ("OK" if news_ok else "NO"),
-        "price(" + str(analysis["change_pct"]) + "%)" + ("OK" if price_ok else "NO"),
-        "RSI(" + str(analysis["rsi"]) + ")" + ("OK" if rsi_ok else "NO"),
-        "vol(" + str(analysis["volume_ratio"]) + "x)" + ("OK" if vol_ok else "NO"),
-        "MA20" + ("OK" if ma_ok else "NO"),
-    ]
-    summary = " | ".join(signals)
-    passed  = sum([news_ok, price_ok, rsi_ok, vol_ok, ma_ok])
-
-    if passed >= 3:
-        return True, summary
-    return False, summary
+    if len(reasons) >= 3:
+        return True, " | ".join(reasons)
+    return False, f"Only {len(reasons)}/3 signals met"
 
 # ── Trading actions ───────────────────────────────────────────────────────────
 
@@ -334,8 +328,7 @@ def place_sell(symbol, qty, reason, state):
 # ── Core loops ────────────────────────────────────────────────────────────────
 
 def scan_and_trade(state):
-    watchlist = state.get("watchlist", BASE_WATCHLIST)
-    push_log(state, f"🔍 Scanning {len(watchlist)} stocks continuously...")
+    push_log(state, "🔍 Scanning watchlist for opportunities...")
     positions = get_open_positions()
     held = {p["symbol"] for p in positions}
 
@@ -343,7 +336,7 @@ def scan_and_trade(state):
         push_log(state, f"Max positions ({MAX_POSITIONS}) reached, skipping scan")
         return
 
-    for symbol in watchlist:
+    for symbol in state.get("watchlist", BASE_WATCHLIST):
         if symbol in held:
             continue
 
@@ -351,15 +344,13 @@ def scan_and_trade(state):
         halal, halal_reason = is_halal(symbol)
         if not halal:
             push_log(state, f"🚫 {symbol} blocked — {halal_reason}", "warn")
-            time.sleep(SECONDS_BETWEEN_STOCKS)
             continue
         else:
-            push_log(state, f"☑️  {symbol} halal OK")
+            push_log(state, f"☑️  {symbol} halal check passed — {halal_reason}")
 
         # ── Technical + news analysis ──────────────────────────────────────
         analysis = analyse_stock(symbol)
         if not analysis:
-            time.sleep(SECONDS_BETWEEN_STOCKS)
             continue
 
         news_score, headlines = get_news_sentiment(symbol)
@@ -370,12 +361,9 @@ def scan_and_trade(state):
             if headlines:
                 push_log(state, f"   📰 {headlines[0]}")
             place_buy(symbol, analysis["price"], state)
-            time.sleep(2)
+            time.sleep(1)
         else:
-            push_log(state, f"⏭ {symbol} — {reason}")
-
-        # small pause between each stock to respect API rate limits
-        time.sleep(SECONDS_BETWEEN_STOCKS)
+            push_log(state, f"⏭ {symbol} skipped — {reason}")
 
 def monitor_positions(state):
     positions = get_open_positions()
@@ -416,8 +404,9 @@ def refresh_watchlist(state):
 
 def main():
     state = load_state()
-    push_log(state, "🚀 Stock agent started — continuous scan mode")
+    push_log(state, "🚀 Stock agent started")
 
+    last_scan    = 0
     last_monitor = 0
     last_trend   = 0
 
@@ -429,18 +418,19 @@ def main():
             time.sleep(300)
             continue
 
-        # Refresh watchlist every 30 min
         if now - last_trend >= TREND_SCAN_MINUTES * 60:
             refresh_watchlist(state)
             last_trend = now
 
-        # Monitor open positions every 5 min
+        if now - last_scan >= SCAN_INTERVAL_MINUTES * 60:
+            scan_and_trade(state)
+            last_scan = now
+
         if now - last_monitor >= POSITION_MONITOR_MINUTES * 60:
             monitor_positions(state)
             last_monitor = now
 
-        # Continuously scan all stocks — no waiting between full cycles
-        scan_and_trade(state)
+        time.sleep(30)
 
 if __name__ == "__main__":
     main()
